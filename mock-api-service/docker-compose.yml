@@ -1,0 +1,8 @@
+services:
+  mock-api:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      MOCK_SCENARIO: standard
+      LATENCY_MULTIPLIER: "1.0"
