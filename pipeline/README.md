@@ -37,6 +37,10 @@ Output: a summary is printed to stdout; the full result (summary + all
 normalized products + rejected records) is written to
 `output/run-<timestamp>.json`.
 
+Exit code mirrors the run status: `1` if the run status is `failure`
+(zero products returned), `0` otherwise — useful for scripting/CI without
+having to parse the JSON output.
+
 To exercise a failure scenario, restart the mock service with
 `MOCK_SCENARIO=source-b-down` (or `slow`, `no-failures`, `bad-data-heavy`) —
 see `../mock-api-service/README.md`.
@@ -79,6 +83,11 @@ malformed-record handling, partial-failure semantics, dedup, timeouts).
   mid-fetch contributes zero products to the merged output — partial pages
   already fetched by that specific cancelled source are not preserved — even
   though other sources' complete results are unaffected.
+- Every product from every source is held in memory for the full run, and
+  the whole result is serialized in a single `json.dumps()` call — fine at
+  fixture scale (18 records), not designed for result sets of millions of
+  records. Would need streaming/NDJSON output and incremental per-record
+  processing instead (see `PLAN.md` → "What I'd Do With More Time").
 
 ## Not Implemented (time-boxed)
 
