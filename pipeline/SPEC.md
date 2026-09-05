@@ -48,43 +48,13 @@
 
 ## Run Summary Output
 
-One JSON file per run (`output/run-<timestamp>.json`), plus the `run` object
-also printed to stdout. Top-level shape:
-
-```json
-{
-  "run": {
-    "status": "partial_success",
-    "started_at": "2026-09-03T18:04:11.123456+00:00",
-    "duration_seconds": 4.201,
-    "deadline_exceeded": false,
-    "total_products": 12,
-    "duplicates_dropped": 0,
-    "sources": {
-      "source_a": {
-        "status": "success",
-        "pages_fetched": 1,
-        "products": 6,
-        "rejected": 0,
-        "retries": 0,
-        "duration_seconds": 0.042,
-        "error": null
-      }
-    }
-  },
-  "products": [ { "...": "Normalized Product, one per unique unified_id" } ],
-  "rejected": [ { "source": "source_b", "reason": "invalid source_b record: ...", "raw": { "...": "the original raw record" } } ]
-}
-```
-
-- `run.status`: see "Run-level status" below.
-- `run.sources.<name>.retries`: total extra attempts beyond the first try,
-  summed across every page fetched from that source (0 means every request
-  succeeded first try).
-- `products`: the deduplicated, merged product list across all sources.
-- `rejected`: every dropped record, from every source, with the reason and
-  the original raw payload — nothing is silently discarded, it's either in
-  `products` or in `rejected`.
+One JSON file per run (`output/run-<timestamp>.json`), the `run` object also
+printed to stdout. Top-level keys: `run` (status, timing, `deadline_exceeded`,
+`total_products`, `duplicates_dropped`, and a per-source breakdown of status/
+pages/products/rejected/retries/duration/error — see "Run-level status"
+below), `products` (the deduplicated list), and `rejected` (every dropped
+record with its `source`/`reason`/original `raw` payload). Nothing is
+silently discarded — a record is always in one of those two lists.
 
 ## Source Behavior Assumptions
 
@@ -104,36 +74,24 @@ independent asyncio tasks.
 - **Transient HTTP failure** (429/502/503) or **request timeout**: retried up
   to 3 attempts total per request, honoring `Retry-After` when the response
   provides one, otherwise exponential backoff (`0.5s * 2^attempt` + jitter).
-- **Retries exhausted on a page**: that source is marked `degraded` (if some
-  pages already succeeded) or `failed` (if none did) for this run. Pages
-  already fetched from that source are **kept**, not discarded.
-- **Malformed page envelope** (the response itself is missing an expected key
-  like `total_pages`/`items`/`data`, or it's the wrong type): distinct from a
-  malformed *record* below — this fails the whole page, not one record, since
-  there's nothing to iterate. Same `degraded`/`failed` + "keep prior pages"
-  handling as a retry exhaustion.
+- **Retries exhausted on a page, malformed page envelope (missing/wrong-type
+  `total_pages`/`items`/`data`), or the `MAX_PAGES=1000` pagination cap**: any
+  of these marks the source `degraded` (if some pages already succeeded) or
+  `failed` (if none did). Pages already fetched are **kept**, not discarded.
+  (The page cap is defense against a runaway upstream — no real run comes
+  close; fixtures top out at 3 pages.)
 - **Malformed record** (wrong type / missing required field, e.g. Source B's
-  non-numeric price): the individual record is dropped, the reason is
-  recorded, and the rest of the page/source keeps processing. One bad record
-  never fails a whole page or source.
-- **Pagination cap reached** (`MAX_PAGES=1000` per source): defense against a
-  misbehaving/adversarial upstream that never stops paginating. Treated the
-  same as retries-exhausted — `degraded`/`failed` with pages fetched so far
-  kept. No real run comes close to this; the fixtures top out at 3 pages.
-- **Duplicate `unified_id`** (same source re-returning a record, e.g. across a
-  retried page): last-seen copy is kept, duplicate is counted, not treated as
-  an error.
-- **Source C rate limit**: paced client-side (minimum gap between requests to
-  source C) as the primary defense; a 429 that still occurs is handled via the
-  standard retry path.
-- **Run deadline** (default 30s, overridable): at the deadline, in-flight work
-  is cancelled and the run finishes with whatever was collected so far. This
-  counts as a form of partial failure (`deadline_exceeded: true` in the
-  summary), never a crash. **Unlike** the "retries exhausted" / "pagination
-  cap" cases above, a source that's still mid-fetch when the deadline hits
-  contributes **zero** products — its task is cancelled outright, so pages it
-  had already fetched before cancellation are not preserved. Other sources
-  that finished within the deadline are unaffected.
+  non-numeric price): the individual record is dropped and logged, the rest
+  of the page/source keeps processing. One bad record never fails a page.
+- **Duplicate `unified_id`**: last-seen copy is kept, duplicate is counted,
+  not treated as an error.
+- **Source C rate limit**: paced client-side as the primary defense; a 429
+  that still occurs is handled via the standard retry path.
+- **Run deadline** (default 30s): in-flight work is cancelled at the deadline
+  and the run finishes with what was collected (`deadline_exceeded: true`),
+  never a crash. Unlike the cases above, a cancelled source contributes
+  **zero** products — its task is discarded outright, not drained — while
+  sources that finished in time are unaffected.
 
 ### Run-level status
 
@@ -143,11 +101,8 @@ independent asyncio tasks.
 - `failure` — zero products returned (e.g. all sources failed, or the
   deadline hit before anything completed).
 
-A run **never raises/crashes** due to upstream behavior; it always produces a
-summary reflecting what happened. The CLI's process exit code mirrors this:
-`1` if `run.status == "failure"`, `0` otherwise — so the run itself can never
-throw, but a caller/CI script can still detect total failure without parsing
-JSON.
+A run **never raises/crashes** due to upstream behavior. CLI exit code
+mirrors `run.status`: `1` on `failure`, `0` otherwise.
 
 ## Assumptions / Ambiguities and How They Were Resolved
 
@@ -178,15 +133,11 @@ JSON.
    (30s default, configurable). Chosen so a hung/slow source degrades the run
    gracefully instead of the whole job hanging indefinitely (relevant given
    `MOCK_SCENARIO=slow`).
-8. **Backoff cap and hostile `Retry-After` values** — exponential backoff is
-   capped at `MAX_BACKOFF_SECONDS=10s` regardless of what a source requests,
-   and a non-numeric, non-finite (`nan`/`inf`), or negative `Retry-After`
-   falls back to normal exponential backoff rather than being trusted
-   verbatim. A source (real or malfunctioning) that returns `Retry-After:
-   999999999` or `Retry-After: nan` must not be able to stall or corrupt the
-   run's timing — `min(nan, cap)` returns `nan`, not the cap, since NaN
-   comparisons are always `False`, which is why this needed an explicit
-   fallback rather than relying on `min()` alone.
+8. **Backoff cap and hostile `Retry-After` values** — backoff is capped at
+   `MAX_BACKOFF_SECONDS=10s`, and a non-finite/negative `Retry-After` falls
+   back to normal exponential backoff instead of being trusted verbatim
+   (`min(nan, cap)` returns `nan`, not the cap, since NaN comparisons are
+   always `False`).
 
 ## Acceptance Criteria (testable)
 

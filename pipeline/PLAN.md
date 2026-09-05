@@ -42,21 +42,15 @@ pipeline/
   fixture and would make the three sources' fetch logic asymmetric for no
   real benefit at this scale. Documented as a "would do with more time" item.
 - **Client-side rate limiting for Source C** via a sliding-window limiter
-  (track last N request timestamps, sleep until the oldest falls outside the
-  1s window before issuing the next call) rather than relying purely on
-  429+retry. Proactive pacing avoids wasting request budget on responses we
-  know will be rejected, and keeps behavior deterministic instead of relying
-  on retry-after-the-fact. (Note: this is a sliding-window counter, not a
-  true leaky bucket — a leaky bucket queues requests and drains at a
-  constant rate; this blocks the caller until there's room in the window.
-  Functionally similar for this use case, but worth naming correctly.)
+  (track last N request timestamps, sleep until the oldest ages out) rather
+  than relying purely on 429+retry — avoids wasting request budget on
+  responses we know will be rejected. (Not a true leaky bucket, which queues
+  and drains at a constant rate — this blocks until there's room in window.)
 - **Dataclasses over pydantic**: no external validation library needed for a
   handful of small, flat models; keeps dependencies minimal.
-- **`bool` explicitly rejected as a numeric `amount_cents` for Source B**:
-  Python's `bool` is a subclass of `int`, so `isinstance(True, int)` is
-  `True` — without an explicit `isinstance(cents, bool)` guard in
-  `normalize.py`, a record with `"amount_cents": true` would silently
-  normalize to a $0.01 product instead of being rejected as malformed.
+- **`bool` explicitly rejected as Source B's `amount_cents`**: `bool` is a
+  subclass of `int` in Python, so without a guard `"amount_cents": true`
+  would silently normalize to $0.01 instead of being rejected.
 - **JSON file output + stdout summary**: task.md leaves output format open;
   JSON is trivially inspectable (`jq`, editor, or a follow-up consumer) and
   matches the normalized-product example format directly.
@@ -115,43 +109,23 @@ pipeline/
 
 ## What I'd Do With More Time
 
-- **Parallelize Source A's pages**: fetch page 1 first to learn
-  `total_pages`, then `asyncio.gather` the rest (`2..total_pages`) instead of
-  looping sequentially. Source A is the only one this applies to — B/C's
-  pagination tokens (`next_cursor`/`next_offset`) are only known from the
-  prior response, so they're sequential by necessity, not by choice.
-- **Wrap it behind an HTTP endpoint**: a small FastAPI/Starlette app exposing
-  `POST /aggregate` that calls `run_pipeline()` directly and returns the
-  summary dict as the response body. `run_pipeline()` is already
-  side-effect-free apart from the caller choosing to call `write_output()`
-  separately, so this is a thin adapter, not a rewrite.
-- **Structured logging**: replace the current stdlib `logging` text output
-  with one JSON-line log record per event (retry attempt, page fetched,
-  record rejected, source degraded), each tagged with a `run_id`, so a real
-  aggregator (Datadog/CloudWatch/etc.) could correlate every retry and
-  rejection back to a specific run without parsing prose.
-- **Persist run history**: append a one-line JSON summary (`run_id`,
-  `started_at`, `status`, `total_products`, `duration_seconds`) to a local
-  `output/runs.jsonl` index on every run, so "how has success rate trended
-  over the last N runs" is a `grep`/`jq` away instead of opening every
-  `run-<timestamp>.json` individually.
-- **Per-source retry policy**: move `MAX_ATTEMPTS`/`BASE_BACKOFF`/
-  `MAX_BACKOFF_SECONDS` out of `client.py`'s module constants into a small
-  `RetryPolicy` dataclass passed per source, so a real fourth source with a
-  tighter SLA could get fewer attempts/faster backoff instead of sharing A/B/C's
-  one global policy.
-- **Scaling to result sets much larger than the fixtures**: today
-  `_merge_products` in `run.py` holds every product from every source in
-  memory at once for dedup, and `write_output` serializes the entire summary
-  in a single `json.dumps()` call — both are fine at 18 records, neither
-  scales to millions. I'd (1) make each source fetcher an async generator
-  that yields normalized products as they're produced instead of
-  accumulating a full list, (2) switch output to streaming NDJSON (one
-  product per line, written incrementally) with the small `run` summary kept
-  as a separate single JSON file, and (3) if the in-memory `seen: dict[str,
-  Product]` dedup map itself became the bottleneck, replace it with a
-  streaming k-way merge over per-source sorted output instead of an
-  unbounded hash map.
+- **Parallelize Source A's pages**: fetch page 1 to learn `total_pages`, then
+  `asyncio.gather` the rest — the only source where this applies, since B/C's
+  pagination tokens are only known from the prior response.
+- **Wrap it behind an HTTP endpoint**: a thin `POST /aggregate` adapter
+  calling `run_pipeline()` directly, already side-effect-free apart from
+  `write_output()`.
+- **Structured logging**: JSON-line log records per event (retry, reject,
+  degrade), tagged with a `run_id`, instead of stdlib `logging` text.
+- **Persist run history**: append a one-line summary to `output/runs.jsonl`
+  per run instead of one file per run with no cross-run view.
+- **Per-source retry policy**: move retry constants into a `RetryPolicy`
+  dataclass passed per source instead of one global policy for all three.
+- **Scaling to much larger result sets**: `_merge_products` holds every
+  product in memory and `write_output` serializes it in one `json.dumps()`
+  call — fine at 18 records, not at millions. Would move to streaming NDJSON
+  output, per-record generators instead of buffered lists, and (if the
+  in-memory `seen` dedup map itself became the bottleneck) a streaming k-way
+  merge instead of a hash map.
 
-This list is finalized in `README.md` under "Known limitations" once the
-implementation is done.
+This list is finalized in `README.md` under "Known limitations."
