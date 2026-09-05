@@ -27,6 +27,7 @@ async def fetch(client: httpx.AsyncClient, base_url: str) -> SourceResult:
         try:
             outcome = await fetch_json(client, f"{base_url}/source-b/products", params=params)
         except FetchError as exc:
+            retries += exc.attempts - 1
             error = str(exc)
             status = "degraded" if pages_fetched > 0 else "failed"
             break
@@ -35,12 +36,16 @@ async def fetch(client: httpx.AsyncClient, base_url: str) -> SourceResult:
         payload = outcome.payload
         try:
             raw_items = payload["items"]
+            if not isinstance(raw_items, list):
+                raise TypeError(f"items is not a list: {raw_items!r}")
             for raw in raw_items:
                 try:
                     products.append(normalize_source_b(raw))
                 except RejectRecord as exc:
                     rejected.append(RejectedRecord(source=NAME, reason=exc.reason, raw=raw))
             cursor = payload.get("next_cursor")
+            if cursor is not None and not isinstance(cursor, str):
+                raise TypeError(f"next_cursor is not a string: {cursor!r}")
         except (KeyError, TypeError) as exc:
             error = f"malformed response payload: {exc}"
             status = "degraded" if pages_fetched > 0 else "failed"

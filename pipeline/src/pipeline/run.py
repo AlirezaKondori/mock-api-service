@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -125,6 +126,11 @@ def _build_summary(
 def write_output(summary: dict, out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    path = out_dir / f"run-{ts}.json"
+    # The timestamp alone is only second-precision, so two runs completing in
+    # the same second would otherwise silently overwrite one another. The
+    # random suffix keeps the human-sortable prefix while guaranteeing the
+    # path is unique regardless of timing.
+    run_id = uuid.uuid4().hex[:8]
+    path = out_dir / f"run-{ts}-{run_id}.json"
     path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return path

@@ -27,6 +27,7 @@ async def fetch(client: httpx.AsyncClient, base_url: str) -> SourceResult:
         try:
             outcome = await fetch_json(client, f"{base_url}/source-a/products", params={"page": page})
         except FetchError as exc:
+            retries += exc.attempts - 1
             error = str(exc)
             status = "degraded" if pages_fetched > 0 else "failed"
             break
@@ -35,7 +36,11 @@ async def fetch(client: httpx.AsyncClient, base_url: str) -> SourceResult:
         payload = outcome.payload
         try:
             total_pages = payload["total_pages"]
+            if not isinstance(total_pages, int) or isinstance(total_pages, bool):
+                raise TypeError(f"total_pages is not an int: {total_pages!r}")
             raw_products = payload["products"]
+            if not isinstance(raw_products, list):
+                raise TypeError(f"products is not a list: {raw_products!r}")
             for raw in raw_products:
                 try:
                     products.append(normalize_source_a(raw))

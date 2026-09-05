@@ -60,9 +60,11 @@ pipeline/
 - Not persisting run history — each run's output file is timestamped but
   there's no index/database of past runs. Fine for a CLI tool exercised
   by hand or in tests; would matter for a real operational service.
-- No structured logging framework (e.g. `structlog`) — using stdlib
-  `logging` with a consistent key=value-ish format. Sufficient at this scale;
-  would reconsider for a system with multiple pipelines/log aggregation.
+- No logging stream at all — no stdlib `logging`, no structured log
+  framework. Observability is the final run summary/rejected-records JSON
+  instead: sufficient to answer "what happened" after the fact at this scale,
+  but not a substitute for an event stream if this became a long-running
+  service (see "What I'd Do With More Time").
 - Rate limiter is process-local (in-memory), not distributed. Fine for a
   single-process one-shot job; would need a shared limiter (Redis, etc.) if
   multiple pipeline instances ran concurrently against Source C.
@@ -116,7 +118,8 @@ pipeline/
   calling `run_pipeline()` directly, already side-effect-free apart from
   `write_output()`.
 - **Structured logging**: JSON-line log records per event (retry, reject,
-  degrade), tagged with a `run_id`, instead of stdlib `logging` text.
+  degrade), tagged with a `run_id` — there's no logging stream at all today
+  (see "Tradeoffs"), just the final run summary/rejected-records JSON.
 - **Persist run history**: append a one-line summary to `output/runs.jsonl`
   per run instead of one file per run with no cross-run view.
 - **Per-source retry policy**: move retry constants into a `RetryPolicy`

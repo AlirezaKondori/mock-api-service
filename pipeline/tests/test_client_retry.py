@@ -62,8 +62,47 @@ async def test_fetch_json_does_not_retry_non_retryable_status():
     async with httpx.AsyncClient() as client:
         with respx.mock(base_url="http://test") as mock:
             mock.get("/thing").mock(return_value=httpx.Response(400, json={"error": "bad_request"}))
-            with pytest.raises(httpx.HTTPStatusError):
+            with pytest.raises(FetchError) as exc_info:
                 await fetch_json(client, "http://test/thing")
+    # Non-retryable means exactly one attempt was spent, not that the caller
+    # should see a raw httpx exception type instead of the normal FetchError.
+    assert exc_info.value.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_json_wraps_connection_error_as_fetch_error_after_retries():
+    async with httpx.AsyncClient() as client:
+        with respx.mock(base_url="http://test") as mock:
+            mock.get("/thing").mock(side_effect=httpx.ConnectError("connection refused"))
+            with pytest.raises(FetchError) as exc_info:
+                await fetch_json(client, "http://test/thing", max_attempts=2)
+    assert exc_info.value.attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_json_retries_connection_error_then_succeeds():
+    async with httpx.AsyncClient() as client:
+        with respx.mock(base_url="http://test") as mock:
+            route = mock.get("/thing")
+            route.side_effect = [
+                httpx.ConnectError("connection refused"),
+                httpx.Response(200, json={"ok": True}),
+            ]
+            outcome = await fetch_json(client, "http://test/thing")
+    assert outcome.payload == {"ok": True}
+    assert outcome.attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_json_wraps_invalid_json_body_as_fetch_error():
+    async with httpx.AsyncClient() as client:
+        with respx.mock(base_url="http://test") as mock:
+            mock.get("/thing").mock(
+                return_value=httpx.Response(200, content=b"not json", headers={"Content-Type": "application/json"})
+            )
+            with pytest.raises(FetchError) as exc_info:
+                await fetch_json(client, "http://test/thing")
+    assert exc_info.value.attempts == 1
 
 
 @pytest.mark.asyncio

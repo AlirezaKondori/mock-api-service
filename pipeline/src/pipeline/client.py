@@ -30,7 +30,7 @@ class FetchOutcome:
 
 
 class RateLimiter:
-    """Client-side leaky bucket: at most `max_calls` calls per rolling `period` seconds."""
+    """Client-side sliding window: at most `max_calls` calls per rolling `period` seconds."""
 
     def __init__(self, max_calls: int, period: float) -> None:
         self._max_calls = max_calls
@@ -59,7 +59,15 @@ async def fetch_json(
     max_attempts: int = MAX_ATTEMPTS,
     rate_limiter: RateLimiter | None = None,
 ) -> FetchOutcome:
-    """GET `url` as JSON, retrying on 429/502/503 and timeouts.
+    """GET `url` as JSON, retrying on 429/502/503, timeouts, and connection errors.
+
+    Every other failure mode a page can hit — a non-retryable HTTP status, a
+    response body that isn't valid JSON — is also normalized into
+    `FetchError` here rather than left to propagate as a raw `httpx`/`json`
+    exception. That keeps exactly one exception type for callers to handle at
+    the page boundary, so a source's accumulated pages/products are never
+    lost just because the *kind* of failure wasn't the one line the caller
+    happened to catch.
 
     Timeout is controlled entirely by `client`'s own configured timeout, not
     by this function, so a single `--timeout` flag governs every request.
@@ -70,10 +78,13 @@ async def fetch_json(
             await rate_limiter.acquire()
         try:
             response = await client.get(url, params=params)
-        except httpx.TimeoutException:
-            last_error = "request timed out"
+        except httpx.RequestError as exc:
+            # Covers both timeouts and lower-level transport failures (connection
+            # refused/reset, DNS failure, etc.) — all are transient-looking from
+            # the caller's perspective, so both get the same retry treatment.
+            last_error = f"request failed: {exc}"
             if attempt == max_attempts:
-                raise FetchError(last_error, attempt)
+                raise FetchError(last_error, attempt) from exc
             await _backoff_sleep(None, attempt)
             continue
 
@@ -84,8 +95,19 @@ async def fetch_json(
             await _backoff_sleep(response.headers.get("Retry-After"), attempt)
             continue
 
-        response.raise_for_status()
-        return FetchOutcome(payload=response.json(), attempts=attempt)
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # A non-retryable status (e.g. 400/404) — not worth spending
+            # attempts on, but still a page-level FetchError, not a crash.
+            raise FetchError(f"HTTP {response.status_code} (non-retryable)", attempt) from exc
+
+        try:
+            payload = response.json()
+        except ValueError as exc:  # json.JSONDecodeError is a ValueError subclass
+            raise FetchError(f"invalid JSON response: {exc}", attempt) from exc
+
+        return FetchOutcome(payload=payload, attempts=attempt)
 
     raise FetchError(last_error, max_attempts)
 

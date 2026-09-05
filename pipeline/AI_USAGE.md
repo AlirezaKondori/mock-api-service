@@ -2,7 +2,7 @@
 
 ## Tools Used
 
-- Claude Code (Sonnet 5) via CLI, used throughout implementation and documentation for this project.
+- Claude Code (Sonnet 5) via CLI, used throughout implementation and documentation for this project.
 
 ## What I Delegated
 
@@ -25,8 +25,9 @@
 
 ## Verification Process
 
-- python -m pytest -v, 50/50 passing.
+- python -m pytest -v, 77/77 passing.
 - Manually ran the mock server under every MOCK_SCENARIO value (standard, source-b-down, slow, no-failures, bad-data-heavy) and inspected each output/run-*.json against SPEC.md's acceptance criteria myself, including confirming the trickiest case (deadline cancellation, --deadline + slow) actually produces deadline_exceeded: true with source_c zeroed out.
+- Didn't take a later external adversarial review's claims at face value — re-derived each of its top findings by reading the actual exception-handling path myself before writing a fix, then confirmed the before/after behavior change against the running mock server (e.g. source_b's reported retries going from 0 to the correct 2 in the source-b-down scenario).
 
 ## An AI Output I Challenged/Rejected/Validated
 
@@ -37,9 +38,11 @@
 
 - Asked for a full audit against task.md for drift. Found one real issue: SPEC.md + PLAN.md had grown past the "one or two pages" guidance (peaked at ~2,811 combined words) from cumulative doc-polish edits. Responded with a trim pass that cut it to ~2,271 words (~19% reduction) while preserving all substantive content — you should note this as "AI flagged its own scope creep in the docs and fixed it without being asked to cut content, just to cut length."
 - Also confirmed via git diff --stat against origin/main that no source code drifted and the mock service was never touched.
+- Ran a second, independent adversarial review against the finished submission. It found 6 real, reproducible defects: non-retryable HTTP errors/bad JSON escaping past the intended retry path and wiping out a source's already-fetched pages; retry counts not recorded on the failure branch; wrong-type envelope fields (total_pages as a string, items as a dict) silently corrupting a page; normalize.py accepting booleans-as-prices, non-finite/oversized numbers, and null ids; and two runs in the same second overwriting each other's output file. I verified each claim against the actual source before accepting it, fixed all 6, added 27 regression tests (50 -> 77), and re-confirmed the fixes live against the real mock server, not just via the test suite.
 
 ## What I'd Improve With More Time
 
 - Run the task.md compliance/spec-vs-implementation audit continuously, not just once at the end. The doc drift past the "one or two pages" guidance only surfaced because I asked for a full audit late; catching it after each editing round instead of retroactively would show tighter iteration.
 - Set an explicit doc length budget up front, before drafting. SPEC.md/PLAN.md grew from a series of individually-reasonable additions to well past guidance; a stated target from the start keeps each edit self-limiting instead of requiring a trim pass later.
 - Resolve the logging-vs-JSON-output tradeoff during spec review, before implementation, not after. This is the one from the "challenged" section — deciding observability approach at the spec stage (where task.md's workflow says it belongs) instead of discovering the gap post-hoc would have turned it into a design decision rather than a deferred item.
+- Catch documentation drift from my own fixes as I make them. Fixing the logging claim left two more stale references behind (an old output-filename format, a wrong test count) that only surfaced because I was asked for a separate consistency pass — the "audit continuously, not at the end" lesson above hadn't fully stuck.

@@ -48,7 +48,9 @@
 
 ## Run Summary Output
 
-One JSON file per run (`output/run-<timestamp>.json`), the `run` object also
+One JSON file per run (`output/run-<timestamp>-<run-id>.json` — the random
+id, not just the second-precision timestamp, is what guarantees two runs
+never collide on the same filename), the `run` object also
 printed to stdout. Top-level keys: `run` (status, timing, `deadline_exceeded`,
 `total_products`, `duplicates_dropped`, and a per-source breakdown of status/
 pages/products/rejected/retries/duration/error — see "Run-level status"
@@ -71,18 +73,27 @@ independent asyncio tasks.
 
 ## Failure Behavior
 
-- **Transient HTTP failure** (429/502/503) or **request timeout**: retried up
-  to 3 attempts total per request, honoring `Retry-After` when the response
-  provides one, otherwise exponential backoff (`0.5s * 2^attempt` + jitter).
+- **Transient HTTP failure** (429/502/503), **request timeout**, or
+  **connection error**: retried up to 3 attempts total per request, honoring
+  `Retry-After` when the response provides one, otherwise exponential backoff
+  (`0.5s * 2^attempt` + jitter).
+- **Non-retryable HTTP status (e.g. 400/404/500) or an invalid JSON body**:
+  not worth spending retries on, so this fails the request in one attempt
+  rather than three — but is still a page-level failure, handled identically
+  to the exhausted-retries case below, not a crash.
 - **Retries exhausted on a page, malformed page envelope (missing/wrong-type
   `total_pages`/`items`/`data`), or the `MAX_PAGES=1000` pagination cap**: any
   of these marks the source `degraded` (if some pages already succeeded) or
-  `failed` (if none did). Pages already fetched are **kept**, not discarded.
+  `failed` (if none did). Pages already fetched are **kept**, not discarded —
+  every one of these failure kinds is normalized to the same `FetchError`/
+  `TypeError` handling at the page boundary, so none of them can silently
+  escape and wipe out a source's accumulated progress.
   (The page cap is defense against a runaway upstream — no real run comes
   close; fixtures top out at 3 pages.)
 - **Malformed record** (wrong type / missing required field, e.g. Source B's
-  non-numeric price): the individual record is dropped and logged, the rest
-  of the page/source keeps processing. One bad record never fails a page.
+  non-numeric price): the individual record is dropped and recorded in the
+  run's `rejected` output, the rest of the page/source keeps processing. One
+  bad record never fails a page.
 - **Duplicate `unified_id`**: last-seen copy is kept, duplicate is counted,
   not treated as an error.
 - **Source C rate limit**: paced client-side as the primary defense; a 429
@@ -118,7 +129,7 @@ mirrors `run.status`: `1` on `failure`, `0` otherwise.
    the mock is explicitly designed to succeed on retry (B's failure budget,
    C's rate-limit reset), and the header tells us exactly how long to wait —
    ignoring it would be strictly worse for no benefit.
-4. **Malformed records** — skip + log, don't fail the page/source. A pipeline
+4. **Malformed records** — skip + record in `rejected`, don't fail the page/source. A pipeline
    whose entire output disappears because of one bad price field is worse
    than one that reports "5 of 6 records normalized, 1 rejected: bad price".
 5. **Partial source failure** — `partial_success` status, not a hard failure.
@@ -141,16 +152,19 @@ mirrors `run.status`: `1` on `failure`, `0` otherwise.
 
 ## Acceptance Criteria (testable)
 
-All verified by `tests/test_run_integration.py` against the real mock server
-(`python -m pytest -v`, 50/50 passing as of this writing).
+Verified by `tests/test_run_integration.py` against the real mock server
+unless noted otherwise (`python -m pytest -v`, 77/77 passing as of this
+writing).
 
 - [x] Running against `MOCK_SCENARIO=standard` produces 17 normalized products
       (6 + 6 + 6, minus 1 rejected malformed Source B record), run status
       `success`.
 - [x] Source B's `cursor-2`/`cursor-3` transient failures are retried and
       succeed without being reported as a source failure.
-- [x] Source C never receives more than 2 requests in any rolling 1-second
-      window during a normal run (verified via request timestamps).
+- [x] The shared rate limiter never allows more than `max_calls` requests in
+      any rolling window (verified via request timestamps in
+      `tests/test_client_retry.py`, unit-level against a mocked clock, not
+      against the real server's own enforcement).
 - [x] `MOCK_SCENARIO=source-b-down` produces run status `partial_success`,
       12 products (A + C only), Source B reported as `failed` in the summary.
 - [x] A record with a malformed price is dropped and counted in

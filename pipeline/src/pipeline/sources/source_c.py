@@ -32,6 +32,7 @@ async def fetch(client: httpx.AsyncClient, base_url: str, rate_limiter: RateLimi
                 rate_limiter=rate_limiter,
             )
         except FetchError as exc:
+            retries += exc.attempts - 1
             error = str(exc)
             status = "degraded" if pages_fetched > 0 else "failed"
             break
@@ -40,12 +41,16 @@ async def fetch(client: httpx.AsyncClient, base_url: str, rate_limiter: RateLimi
         payload = outcome.payload
         try:
             raw_data = payload["data"]
+            if not isinstance(raw_data, list):
+                raise TypeError(f"data is not a list: {raw_data!r}")
             for raw in raw_data:
                 try:
                     products.append(normalize_source_c(raw))
                 except RejectRecord as exc:
                     rejected.append(RejectedRecord(source=NAME, reason=exc.reason, raw=raw))
             offset = payload.get("next_offset")
+            if offset is not None and (not isinstance(offset, int) or isinstance(offset, bool)):
+                raise TypeError(f"next_offset is not an int: {offset!r}")
         except (KeyError, TypeError) as exc:
             error = f"malformed response payload: {exc}"
             status = "degraded" if pages_fetched > 0 else "failed"

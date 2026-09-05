@@ -125,6 +125,70 @@ async def test_fetch_natural_completion_at_max_pages_boundary_is_not_misreported
 
 
 @pytest.mark.asyncio
+async def test_fetch_degrades_but_keeps_prior_pages_on_non_retryable_http_error():
+    # A non-retryable status (500) used to raise a raw httpx.HTTPStatusError
+    # that escaped this function's only `except FetchError`, so the outer
+    # orchestrator would replace the whole result with an empty one. Now that
+    # fetch_json() normalizes it into FetchError, page 1's product must survive.
+    async with httpx.AsyncClient() as client:
+        with respx.mock(base_url="http://test") as mock:
+            mock.get("/source-b/products").mock(
+                side_effect=[
+                    httpx.Response(200, json={
+                        "items": [{"sku": "b-1", "title": "One", "amount_cents": 100, "department": "x"}],
+                        "next_cursor": "cursor-2",
+                    }),
+                    httpx.Response(500, json={"error": "server_error"}),
+                ]
+            )
+            result = await source_b.fetch(client, "http://test")
+
+    assert result.status == "degraded"
+    assert result.pages_fetched == 1
+    assert [p.id for p in result.products] == ["b-1"]
+    assert result.error is not None
+
+
+@pytest.mark.asyncio
+async def test_fetch_reports_retries_on_exhausted_attempts():
+    # Previously, retries were only accumulated on the success path, so a
+    # source that failed after exhausting every retry reported retries == 0.
+    async with httpx.AsyncClient() as client:
+        with respx.mock(base_url="http://test") as mock:
+            mock.get("/source-b/products").mock(
+                return_value=httpx.Response(503, json={"error": "unavailable"}, headers={"Retry-After": "0"})
+            )
+            result = await source_b.fetch(client, "http://test")
+
+    assert result.status == "failed"
+    assert result.retries == 2  # 3 exhausted attempts == 2 retries
+
+
+@pytest.mark.asyncio
+async def test_fetch_degrades_but_keeps_prior_pages_on_wrong_type_items():
+    async with httpx.AsyncClient() as client:
+        with respx.mock(base_url="http://test") as mock:
+            mock.get("/source-b/products").mock(
+                side_effect=[
+                    httpx.Response(200, json={
+                        "items": [{"sku": "b-1", "title": "One", "amount_cents": 100, "department": "x"}],
+                        "next_cursor": "cursor-2",
+                    }),
+                    # "items" should be a list; a dict must not be silently
+                    # iterated as if it were one (previously this iterated
+                    # the dict's keys and returned success with 0 products).
+                    httpx.Response(200, json={"items": {}, "next_cursor": None}),
+                ]
+            )
+            result = await source_b.fetch(client, "http://test")
+
+    assert result.status == "degraded"
+    assert result.pages_fetched == 1
+    assert [p.id for p in result.products] == ["b-1"]
+    assert result.error is not None
+
+
+@pytest.mark.asyncio
 async def test_fetch_degrades_but_keeps_prior_pages_on_malformed_envelope():
     async with httpx.AsyncClient() as client:
         with respx.mock(base_url="http://test") as mock:

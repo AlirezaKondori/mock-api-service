@@ -35,7 +35,9 @@ run budget in seconds, default 30.0), `--out` (output directory, default
 
 Output: a summary is printed to stdout; the full result (summary + all
 normalized products + rejected records) is written to
-`output/run-<timestamp>.json`.
+`output/run-<timestamp>-<run-id>.json`. The random id (not just the
+second-precision timestamp) is what actually guarantees two runs never
+collide on the same filename.
 
 Exit code mirrors the run status: `1` if the run status is `failure`
 (zero products returned), `0` otherwise — useful for scripting/CI without
@@ -91,7 +93,9 @@ malformed-record handling, partial-failure semantics, dedup, timeouts).
 
 ## Not Implemented (time-boxed)
 
-- Structured/JSON logging (stdlib `logging` text output is used instead).
+- Any logging stream (stdlib or structured). The run's JSON output (summary
+  + rejected records) is the only observability artifact; there is no
+  separate log of individual events.
 - Per-source-configurable retry policy (one global policy for all sources).
 - CI configuration / containerization of `pipeline/` itself — intentionally
   out of scope per `task.md`'s "no extra infrastructure" guidance.
